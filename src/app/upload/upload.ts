@@ -1,102 +1,142 @@
-import { Component } from '@angular/core';
-import { NgIf } from '@angular/common';
+import { Component, ViewChild, ElementRef, SecurityContext } from '@angular/core';
+import { FormsModule } from '@angular/forms';
+import { CommonModule } from '@angular/common';
 import { HttpClient, HttpHeaders, HttpClientModule } from '@angular/common/http';
 import * as pdfjsLib from 'pdfjs-dist';
 import { environment } from '../../environments/environment';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
+import { marked } from 'marked';
 
 @Component({
   selector: 'app-upload',
-  standalone: true,
-  imports: [NgIf, HttpClientModule],
   templateUrl: './upload.html',
-  styleUrl: './upload.css'
+  styleUrls: ['./upload.css'],
+  standalone: true,
+  imports: [CommonModule, FormsModule, HttpClientModule]
 })
 export class UploadComponent {
-  selectedFile: File | null = null;
-  selectedFileName: string = '';
-  jobDescription: string = '';
-  geminiResponse: any = null; // To store the raw Gemini response
-  parsedGeminiResponse: { matchPercentage: number; suggestions: string } | null = null; // To store the parsed Gemini response
-  loadingGemini: boolean = false; // To indicate if Gemini API call is in progress
+  @ViewChild('fileInput') fileInput!: ElementRef;
 
-  constructor(private http: HttpClient) {
-    // Set the worker source for pdf.js
+  selectedFileName: string | null = null;
+  selectedFile: File | null = null;
+  jobDescription: string = '';
+  loadingGemini: boolean = false;
+  isDragging: boolean = false;
+  error: string | null = null;
+  parsedGeminiResponse: {
+    matchPercentage: number;
+    suggestions: string;
+  } | null = null;
+  sanitizedSuggestionsHtml: SafeHtml | null = null;
+
+  constructor(private http: HttpClient, private sanitizer: DomSanitizer) {
     pdfjsLib.GlobalWorkerOptions.workerSrc = './assets/pdf.worker.mjs';
   }
 
   onFileSelected(event: Event) {
     const input = event.target as HTMLInputElement;
-    if (input.files && input.files.length > 0) {
-      this.selectedFile = input.files[0];
-      this.selectedFileName = this.selectedFile.name;
+    if (input.files && input.files[0]) {
+      this.handleFile(input.files[0]);
     }
   }
 
+  triggerFileInput() {
+    this.fileInput.nativeElement.click();
+  }
+
+  onDragOver(event: DragEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    this.isDragging = true;
+  }
+
+  onDragLeave(event: DragEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    this.isDragging = false;
+  }
+
+  onDrop(event: DragEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    this.isDragging = false;
+
+    if (event.dataTransfer?.files && event.dataTransfer.files[0]) {
+      this.handleFile(event.dataTransfer.files[0]);
+    }
+  }
+
+  private handleFile(file: File) {
+    if (file.type !== 'application/pdf') {
+      this.error = 'Please upload a PDF file';
+      return;
+    }
+    this.error = null;
+    this.selectedFile = file;
+    this.selectedFileName = file.name;
+  }
+
+  removeFile() {
+    this.selectedFile = null;
+    this.selectedFileName = null;
+  }
+
   async processPdf() {
-    if (!this.selectedFile) {
-      console.error('No PDF file selected.');
+    if (!this.selectedFile || !this.jobDescription) {
+      this.error = 'Please upload a resume and provide a job description';
       return;
     }
 
-    if (this.selectedFile.type !== 'application/pdf') {
-      console.error('Please upload a PDF file.');
-      return;
-    }
+    this.loadingGemini = true;
+    this.error = null;
+    this.parsedGeminiResponse = null;
+    this.sanitizedSuggestionsHtml = null;
 
-    const reader = new FileReader();
+    try {
+      const reader = new FileReader();
 
-    reader.onload = async (e: any) => {
-      try {
-        const arrayBuffer = e.target.result;
-        const pdfDocument = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      reader.onload = async (e: any) => {
+        try {
+          const arrayBuffer = e.target.result;
+          const pdfDocument = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
-        let fullText = '';
-        for (let i = 1; i <= pdfDocument.numPages; i++) {
-          const page = await pdfDocument.getPage(i);
-          const textContent = await page.getTextContent();
-          fullText += textContent.items.map((item: any) => item.str).join(' ') + '\n';
+          let fullText = '';
+          for (let i = 1; i <= pdfDocument.numPages; i++) {
+            const page = await pdfDocument.getPage(i);
+            const textContent = await page.getTextContent();
+            fullText += textContent.items.map((item: any) => item.str).join(' ') + '\n';
+          }
+
+          console.log('Extracted PDF Text:', fullText.trim());
+          console.log('Job Description:', this.jobDescription);
+
+          await this.callGemini(fullText.trim(), this.jobDescription);
+
+        } catch (error) {
+          console.error('Error processing PDF:', error);
+          this.error = 'An error occurred while processing your resume. Please try again.';
         }
+      };
+      reader.readAsArrayBuffer(this.selectedFile);
 
-        console.log('Extracted PDF Text:', fullText.trim());
-        console.log('Job Description:', this.jobDescription);
-
-        // Call Gemini API after PDF text and job description are available
-        await this.callGemini(fullText.trim(), this.jobDescription);
-
-      } catch (error) {
-        console.error('Error processing PDF:', error);
-      }
-    };
-    reader.readAsArrayBuffer(this.selectedFile);
+    } catch (err) {
+      this.error = 'An error occurred while processing your resume. Please try again.';
+      this.loadingGemini = false;
+    }
   }
 
   async callGemini(resumeText: string, jobDescription: string) {
     this.loadingGemini = true;
     try {
-      const genAI = new GoogleGenerativeAI(environment.geminiApiKey);
+      const genAI = new GoogleGenerativeAI(environment.GEMINI_API_KEY);
       
-      // Use the text model with streaming and explicitly request JSON output
       const model = genAI.getGenerativeModel({
         model: "gemini-2.0-flash",
-        generationConfig: { responseMimeType: "application/json" }, // Explicitly request JSON
+        generationConfig: { responseMimeType: "application/json" },
       });
 
-      const prompt = `You are a professional resume analyzer. Analyze the following resume against the job description and provide a detailed assessment.
-
-Resume:
-${resumeText}
-
-Job Description:
-${jobDescription}
-
-Please provide your analysis in the following JSON format:
-{
-  "matchPercentage": number, // A number between 0-100 indicating how well the resume matches the job
-  "suggestions": string // A detailed list of suggestions for improvement
-}
-
-Ensure the response is valid JSON.`;
+      const prompt = `You are a professional resume analyzer. Analyze the following resume against the job description and provide a detailed assessment.\n\nResume:\n${resumeText}\n\nJob Description:\n${jobDescription}\n\nPlease provide your analysis in the following JSON format:\n{\n  "matchPercentage": number, // A number between 0-100 indicating how well the resume matches the job\n  "suggestions": string // A detailed list of suggestions for improvement\n}\n\nEnsure the response is valid JSON.`;
 
       console.log('Sending request to Gemini API...');
       let fullText = '';
@@ -110,15 +150,25 @@ Ensure the response is valid JSON.`;
       console.log('Raw Gemini Response (full):', fullText);
 
       try {
-        // Clean the response text to ensure it's valid JSON
         const cleanedText = fullText.replace(/```json\n?|\n?```/g, '').trim();
         console.log('Cleaned Gemini Response (before parse):', cleanedText);
+        if (!cleanedText) {
+          throw new Error("Cleaned text is empty, cannot parse.");
+        }
         this.parsedGeminiResponse = JSON.parse(cleanedText);
+
+        // Convert Markdown suggestions to HTML and sanitize
+        if (this.parsedGeminiResponse && this.parsedGeminiResponse.suggestions) {
+          const html = await marked.parse(this.parsedGeminiResponse.suggestions);
+          this.sanitizedSuggestionsHtml = this.sanitizer.bypassSecurityTrustHtml(html as string);
+        }
+
         console.log('Successfully parsed response:', this.parsedGeminiResponse);
       } catch (parseError) {
         console.error('Error parsing Gemini response:', parseError);
         console.error('Raw text that failed to parse:', fullText);
         this.parsedGeminiResponse = null;
+        this.error = 'Failed to parse Gemini response. Please try again.';
       }
 
     } catch (error) {
@@ -128,6 +178,7 @@ Ensure the response is valid JSON.`;
         console.error('Error stack:', error.stack);
       }
       this.parsedGeminiResponse = null;
+      this.error = 'An error occurred while communicating with the Gemini API. Please check your API key and try again.';
     } finally {
       this.loadingGemini = false;
     }

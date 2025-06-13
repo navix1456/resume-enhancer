@@ -1,0 +1,37 @@
+.prose {
+  /* General spacing for paragraphs */
+  p {
+    margin-bottom: 1em;
+    line-height: 1.6;
+  }
+
+  /* Spacing for headings, which will be your bolded recommendations */
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    margin-top: 1.5em;
+    margin-bottom: 0.75em;
+    line-height: 1.3;
+  }
+
+  /* Spacing for list items */
+  ul,
+  ol {
+    margin-bottom: 1em;
+    padding-left: 1.5em; /* Indent lists */
+  }
+
+  li {
+    margin-bottom: 0.5em;
+  }
+
+  /* Ensure strong/bold text within paragraphs is well-defined */
+  p strong {
+    display: block;
+    margin-top: 1em; /* Add space above bold headings within paragraphs */
+    font-size: 1.1em; /* Slightly larger font for bold headings */
+  }
+}
